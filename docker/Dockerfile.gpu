@@ -1,0 +1,69 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ---- System dependencies (OpenCV/MuJoCo offscreen render/video) ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    ffmpeg \
+    build-essential \
+    pkg-config \
+    libgl1 \
+    libegl1 \
+    libgles2 \
+    libgl1-mesa-dri \
+    libglib2.0-0 \
+    libxext6 \
+    libxrender1 \
+    libsm6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- micromamba ----
+ENV MAMBA_ROOT_PREFIX=/opt/micromamba
+ENV PATH=${MAMBA_ROOT_PREFIX}/bin:${PATH}
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+  | tar -xvj -C /usr/local/bin/ --strip-components=1 bin/micromamba
+
+WORKDIR /workspace/TWIST2
+
+# ---- Create conda env from exported file ----
+# Expect you to generate this file from your host:
+#   conda env export -n twist2 --no-builds > environment.twist2.yml
+COPY environment.twist2.yml /tmp/environment.twist2.yml
+
+# Clean up host-specific parts so it can be used inside container:
+# - drop `prefix: ...`
+# - normalize channels to conda-forge/defaults (avoid hardcoded mirror URLs)
+RUN awk ' \
+  BEGIN{in_channels=0} \
+  /^channels:/{ \
+    print \"channels:\"; \
+    print \"  - conda-forge\"; \
+    print \"  - defaults\"; \
+    in_channels=1; \
+    next \
+  } \
+  in_channels && /^dependencies:/{in_channels=0; print; next} \
+  in_channels{next} \
+  /^prefix:/{next} \
+  {print} \
+  ' /tmp/environment.twist2.yml > /tmp/environment.docker.yml
+
+# Create env and make it default by PATH
+RUN micromamba create -y -n twist2 -f /tmp/environment.docker.yml \
+  && micromamba clean -a -y
+
+ENV CONDA_DEFAULT_ENV=twist2
+ENV PATH=${MAMBA_ROOT_PREFIX}/envs/twist2/bin:${PATH}
+
+# Common runtime envs for MuJoCo offscreen; adjust if you need GUI.
+ENV MUJOCO_GL=egl
+
+# ---- Copy code (do this after env for better layer caching) ----
+COPY . /workspace/TWIST2
+
+CMD ["/bin/bash"]
+
+
