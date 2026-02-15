@@ -10,7 +10,6 @@ cd deploy_real
 # 配置参数
 redis_ip="localhost"
 hand_side="left"  # "left" 或 "right"
-# hand_side="right"  # "left" 或 "right"
 target_fps=50
 
 # 运行控制器
