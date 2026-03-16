@@ -190,21 +190,21 @@ MEDIAPIPE_MAPPING_26_TO_21 = [
     3,  # 2: ThumbProximal -> Thumb MCP
     4,  # 3: ThumbDistal -> Thumb IP
     5,  # 4: ThumbTip -> Thumb Tip
-    6,  # 5: IndexMetacarpal -> Index MCP
-    7,  # 6: IndexProximal -> Index PIP
-    8,  # 7: IndexIntermediate -> Index DIP
+    7,  # 5: IndexMetacarpal -> Index MCP
+    8,  # 6: IndexProximal -> Index PIP
+    9,  # 7: IndexIntermediate -> Index DIP
     10,  # 8: IndexTip -> Index Tip (skip IndexDistal)
-    11,  # 9: MiddleMetacarpal -> Middle MCP
-    12,  # 10: MiddleProximal -> Middle PIP
-    13,  # 11: MiddleIntermediate -> Middle DIP
+    12,  # 9: MiddleMetacarpal -> Middle MCP
+    13,  # 10: MiddleProximal -> Middle PIP
+    14,  # 11: MiddleIntermediate -> Middle DIP
     15,  # 12: MiddleTip -> Middle Tip (skip MiddleDistal)
-    16,  # 13: RingMetacarpal -> Ring MCP
-    17,  # 14: RingProximal -> Ring PIP
-    18,  # 15: RingIntermediate -> Ring DIP
+    17,  # 13: RingMetacarpal -> Ring MCP
+    18,  # 14: RingProximal -> Ring PIP
+    19,  # 15: RingIntermediate -> Ring DIP
     20,  # 16: RingTip -> Ring Tip (skip RingDistal)
-    21,  # 17: LittleMetacarpal -> Pinky MCP
-    22,  # 18: LittleProximal -> Pinky PIP
-    23,  # 19: LittleIntermediate -> Pinky DIP
+    22,  # 17: LittleMetacarpal -> Pinky MCP
+    23,  # 18: LittleProximal -> Pinky PIP
+    24,  # 19: LittleIntermediate -> Pinky DIP
     25,  # 20: LittleTip -> Pinky Tip (skip LittleDistal)
 ]
 
@@ -237,29 +237,29 @@ def hand_26d_to_mediapipe_21d(hand_data_dict: Dict[str, Any], hand_side: str = "
 def _try_import_wuji_retargeting():
     """
     Lazy import to avoid hard dependency when user doesn't need local retarget.
-    Returns (WujiHandRetargeter, apply_mediapipe_transformations) or (None, None)
+    Returns (Retargeter, apply_mediapipe_transformations) or (None, None)
     """
     try:
         project_root = Path(__file__).resolve().parents[1]
-        wuji_path = project_root / "wuji_retargeting"
-        if str(wuji_path) not in sys.path:
-            sys.path.insert(0, str(wuji_path))
-        from wuji_retargeting import WujiHandRetargeter  # type: ignore
+        for wuji_path in [project_root / "wuji-retargeting", project_root / "wuji_retargeting"]:
+            if wuji_path.exists() and str(wuji_path) not in sys.path:
+                sys.path.insert(0, str(wuji_path))
+        from wuji_retargeting import Retargeter  # type: ignore
         from wuji_retargeting.mediapipe import apply_mediapipe_transformations  # type: ignore
 
-        return WujiHandRetargeter, apply_mediapipe_transformations
+        return Retargeter, apply_mediapipe_transformations
     except Exception:
         return None, None
 
 
 def _try_import_training():
     """
-    Lazy import training model package from repo's `wuji_retarget/`.
+    Lazy import training model package from repo's `wuji_policy/`.
     Returns training module or None.
     """
     try:
         project_root = Path(__file__).resolve().parents[1]
-        training_root = project_root / "wuji_retarget"
+        training_root = project_root / "wuji_policy"
         if str(training_root) not in sys.path:
             sys.path.insert(0, str(training_root))
         import training  # type: ignore
@@ -267,6 +267,52 @@ def _try_import_training():
         return training
     except Exception:
         return None
+
+
+def _build_wuji_reorder_idx(retargeter: Any) -> Optional[np.ndarray]:
+    """Map retarget output order to Wuji 5x4 finger order by joint name."""
+    retarget_joint_names: List[str] = []
+    try:
+        opt = getattr(retargeter, "optimizer", None)
+        if opt is not None and hasattr(opt, "target_joint_names"):
+            retarget_joint_names = list(opt.target_joint_names)
+    except Exception:
+        retarget_joint_names = []
+    if not retarget_joint_names:
+        return None
+
+    desired_joint_names = [f"finger{i}_joint{j}" for i in range(1, 6) for j in range(1, 5)]
+    name2idx = {n: i for i, n in enumerate(retarget_joint_names)}
+    if not all(n in name2idx for n in desired_joint_names):
+        return None
+    return np.asarray([name2idx[n] for n in desired_joint_names], dtype=np.int32)
+
+
+def _resolve_local_wuji_retarget_config(args: argparse.Namespace, side: str) -> str:
+    """Resolve local retarget YAML path (side-specific override > common > default)."""
+    assert side in ["left", "right"]
+    project_root = Path(__file__).resolve().parents[1]
+    default_cfg = (project_root / "wuji-retargeting" / "example" / "config" / f"retarget_manus_{side}.yaml").resolve()
+    common_cfg = str(getattr(args, "local_wuji_retarget_config", "") or "").strip()
+    side_cfg = str(getattr(args, f"local_wuji_retarget_config_{side}", "") or "").strip()
+    raw = side_cfg or common_cfg
+    if not raw:
+        return str(default_cfg)
+
+    cfg_path = Path(raw).expanduser()
+    if not cfg_path.is_absolute():
+        candidates = [
+            (project_root / cfg_path).resolve(),
+            (Path(__file__).resolve().parent / cfg_path).resolve(),
+            cfg_path.resolve(),
+        ]
+        for cand in candidates:
+            if cand.exists():
+                cfg_path = cand
+                break
+        else:
+            cfg_path = candidates[0]
+    return str(cfg_path)
 
 
 class RealSenseVisionSource:
@@ -350,16 +396,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--local_wuji_write_redis", type=int, default=1, help="Write local retarget output back to Redis (0/1)")
 
-    # local wuji mode: DexPilot retarget (default) vs training model inference
-    p.add_argument("--local_wuji_use_model", type=int, default=0, help="Use training model inference for local wuji target generation (0/1, default=0)")
+    # local wuji mode: DexPilot retarget (default) vs GeoRT model inference
+    p.add_argument("--local_wuji_use_model", type=int, default=0, help="Use GeoRT model inference for local wuji target generation (0/1, default=0)")
     # Keep argument names aligned with deploy2.py / wuji_hand_model_deploy.sh.
-    p.add_argument("--local_wuji_policy_tag", type=str, default="training_filter_wuji", help="Local training model tag (--local_wuji_use_model=1)")
-    p.add_argument("--local_wuji_policy_epoch", type=int, default=-1, help="Local training model epoch (--local_wuji_use_model=1)")
+    p.add_argument("--local_wuji_policy_tag", type=str, default="geort_filter_wuji", help="Local GeoRT model tag (--local_wuji_use_model=1)")
+    p.add_argument("--local_wuji_policy_epoch", type=int, default=-1, help="Local GeoRT model epoch (--local_wuji_use_model=1)")
     p.add_argument("--local_wuji_policy_tag_left", type=str, default="", help="Left-hand tag (optional; empty uses local_wuji_policy_tag)")
     p.add_argument("--local_wuji_policy_epoch_left", type=int, default=-999999, help="Left-hand epoch (optional; -999999 uses local_wuji_policy_epoch)")
     p.add_argument("--local_wuji_policy_tag_right", type=str, default="", help="Right-hand tag (optional; empty uses local_wuji_policy_tag)")
     p.add_argument("--local_wuji_policy_epoch_right", type=int, default=-999999, help="Right-hand epoch (optional; -999999 uses local_wuji_policy_epoch)")
     p.add_argument("--local_wuji_use_fingertips5", type=int, default=1, help="Use 5 fingertips (5,3) as model input (0/1, default=1)")
+    p.add_argument("--local_wuji_retarget_config", type=str, default="", help="Retarget YAML path for both hands (optional)")
+    p.add_argument("--local_wuji_retarget_config_left", type=str, default="", help="Left-hand retarget YAML path override (optional)")
+    p.add_argument("--local_wuji_retarget_config_right", type=str, default="", help="Right-hand retarget YAML path override (optional)")
     # Safety limits for model mode to avoid spikes/out-of-range outputs.
     p.add_argument("--local_wuji_clamp_min", type=float, default=-1.5, help="Minimum clamp value for model output")
     p.add_argument("--local_wuji_clamp_max", type=float, default=1.5, help="Maximum clamp value for model output")
@@ -564,10 +613,12 @@ def main() -> int:
             recording = False
 
     # Optional: local Wuji retargeter init (lazy)
-    WujiHandRetargeter = None
+    RetargeterCls = None
     apply_mediapipe_transformations = None
     retargeter_left = None
     retargeter_right = None
+    retarget_reorder_idx_left = None
+    retarget_reorder_idx_right = None
     training_mod = None
     model_left = None
     model_right = None
@@ -649,9 +700,9 @@ def main() -> int:
 
                 # Local retarget: hand_tracking_* -> action_wuji_qpos_target_* (even without wuji_server)
                 if bool(int(args.local_wuji_retarget)):
-                    if WujiHandRetargeter is None or apply_mediapipe_transformations is None:
-                        WujiHandRetargeter, apply_mediapipe_transformations = _try_import_wuji_retargeting()
-                        if (WujiHandRetargeter is None or apply_mediapipe_transformations is None) and (not _warned_local_wuji):
+                    if RetargeterCls is None or apply_mediapipe_transformations is None:
+                        RetargeterCls, apply_mediapipe_transformations = _try_import_wuji_retargeting()
+                        if (RetargeterCls is None or apply_mediapipe_transformations is None) and (not _warned_local_wuji):
                             _warned_local_wuji = True
                             print("[WARN] Local wuji retarget initialization failed; action_wuji_qpos_target_* generation will be skipped.")
                     if bool(int(args.local_wuji_use_model)) and training_mod is None:
@@ -661,8 +712,9 @@ def main() -> int:
                             print("[WARN] Local wuji model initialization failed (cannot import training); action_wuji_qpos_target_* generation will be skipped.")
 
                     def _maybe_retarget_one(side: str) -> None:
-                        nonlocal retargeter_left, retargeter_right, training_mod, model_left, model_right, last_wuji_left, last_wuji_right
-                        if WujiHandRetargeter is None or apply_mediapipe_transformations is None:
+                        nonlocal retargeter_left, retargeter_right, retarget_reorder_idx_left, retarget_reorder_idx_right
+                        nonlocal training_mod, model_left, model_right, last_wuji_left, last_wuji_right
+                        if RetargeterCls is None or apply_mediapipe_transformations is None:
                             return
                         s = str(side).lower()
                         assert s in ["left", "right"]
@@ -687,7 +739,7 @@ def main() -> int:
                         mp21 = hand_26d_to_mediapipe_21d(hand_dict, hand_side=s)
                         mp_trans = apply_mediapipe_transformations(mp21, hand_type=s)
 
-                        # Choose DexPilot retarget (default) vs training model inference
+                        # Choose DexPilot retarget (default) vs GeoRT model inference
                         if bool(int(args.local_wuji_use_model)):
                             if training_mod is None:
                                 return
@@ -744,13 +796,24 @@ def main() -> int:
                             # DexPilot retargeter
                             if s == "left":
                                 if retargeter_left is None:
-                                    retargeter_left = WujiHandRetargeter(hand_side="left")
-                                rr = retargeter_left.retarget(mp_trans)
+                                    cfg = _resolve_local_wuji_retarget_config(args, "left")
+                                    print(f"[local_wuji:retarget] loading left config: {cfg}")
+                                    retargeter_left = RetargeterCls.from_yaml(str(cfg), hand_side="left")
+                                    retarget_reorder_idx_left = _build_wuji_reorder_idx(retargeter_left)
+                                qpos20 = np.asarray(retargeter_left.retarget(mp_trans), dtype=np.float32).reshape(-1)
+                                reorder_idx = retarget_reorder_idx_left
                             else:
                                 if retargeter_right is None:
-                                    retargeter_right = WujiHandRetargeter(hand_side="right")
-                                rr = retargeter_right.retarget(mp_trans)
-                            wuji_20d = np.asarray(rr.robot_qpos, dtype=np.float32).reshape(5, 4)
+                                    cfg = _resolve_local_wuji_retarget_config(args, "right")
+                                    print(f"[local_wuji:retarget] loading right config: {cfg}")
+                                    retargeter_right = RetargeterCls.from_yaml(str(cfg), hand_side="right")
+                                    retarget_reorder_idx_right = _build_wuji_reorder_idx(retargeter_right)
+                                qpos20 = np.asarray(retargeter_right.retarget(mp_trans), dtype=np.float32).reshape(-1)
+                                reorder_idx = retarget_reorder_idx_right
+                            if reorder_idx is not None and qpos20.shape[0] >= int(reorder_idx.max() + 1):
+                                wuji_20d = qpos20[reorder_idx].reshape(5, 4)
+                            else:
+                                wuji_20d = qpos20.reshape(5, 4)
 
                         if s == "left":
                             last_wuji_left = wuji_20d.copy()

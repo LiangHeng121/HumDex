@@ -75,30 +75,6 @@ HAND_JOINT_NAMES_26 = [
 ]
 
 
-# # 26D -> 21D MediaPipe mapping (aligned with deploy_real/server_wuji_hand_redis.py)
-# MEDIAPIPE_MAPPING_26_TO_21 = [
-#     1,  # 0: Wrist -> Wrist
-#     2,  # 1: ThumbMetacarpal -> Thumb CMC
-#     3,  # 2: ThumbProximal -> Thumb MCP
-#     4,  # 3: ThumbDistal -> Thumb IP
-#     5,  # 4: ThumbTip -> Thumb Tip
-#     6,  # 5: IndexMetacarpal -> Index MCP
-#     7,  # 6: IndexProximal -> Index PIP
-#     8,  # 7: IndexIntermediate -> Index DIP
-#     10,  # 8: IndexTip -> Index Tip (skip IndexDistal)
-#     11,  # 9: MiddleMetacarpal -> Middle MCP
-#     12,  # 10: MiddleProximal -> Middle PIP
-#     13,  # 11: MiddleIntermediate -> Middle DIP
-#     15,  # 12: MiddleTip -> Middle Tip (skip MiddleDistal)
-#     16,  # 13: RingMetacarpal -> Ring MCP
-#     17,  # 14: RingProximal -> Ring PIP
-#     18,  # 15: RingIntermediate -> Ring DIP
-#     20,  # 16: RingTip -> Ring Tip (skip RingDistal)
-#     21,  # 17: LittleMetacarpal -> Pinky MCP
-#     22,  # 18: LittleProximal -> Pinky PIP
-#     23,  # 19: LittleIntermediate -> Pinky DIP
-#     25,  # 20: LittleTip -> Pinky Tip (skip LittleDistal)
-# ]
 
 MEDIAPIPE_MAPPING_26_TO_21 = [
     1,   # 0: Wrist -> Wrist
