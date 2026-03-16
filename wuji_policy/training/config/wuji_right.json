@@ -1,0 +1,49 @@
+{
+    "name": "wuji_right",
+    "urdf_path": "../wuji-retargeting/wuji_retargeting/wuji_hand_description/urdf/right.urdf",
+    "base_link": "right_palm_link",
+    "joint_order": [
+        "right_finger1_joint1", "right_finger1_joint2", "right_finger1_joint3", "right_finger1_joint4",
+        "right_finger2_joint1", "right_finger2_joint2", "right_finger2_joint3", "right_finger2_joint4",
+        "right_finger3_joint1", "right_finger3_joint2", "right_finger3_joint3", "right_finger3_joint4",
+        "right_finger4_joint1", "right_finger4_joint2", "right_finger4_joint3", "right_finger4_joint4",
+        "right_finger5_joint1", "right_finger5_joint2", "right_finger5_joint3", "right_finger5_joint4"
+    ],
+    "fingertip_link": [
+        {
+            "name": "thumb",
+            "link": "right_finger1_tip_link",
+            "joint": ["right_finger1_joint1", "right_finger1_joint2", "right_finger1_joint3", "right_finger1_joint4"],
+            "center_offset": [0.0, 0.0, -0.005],
+            "human_hand_id": 0
+        },
+        {
+            "name": "index",
+            "link": "right_finger2_tip_link",
+            "joint": ["right_finger2_joint1", "right_finger2_joint2", "right_finger2_joint3", "right_finger2_joint4"],
+            "center_offset": [0.0, 0.0, -0.005],
+            "human_hand_id": 1
+        },
+        {
+            "name": "middle",
+            "link": "right_finger3_tip_link",
+            "joint": ["right_finger3_joint1", "right_finger3_joint2", "right_finger3_joint3", "right_finger3_joint4"],
+            "center_offset": [0.0, 0.0, -0.005],
+            "human_hand_id": 2
+        },
+        {
+            "name": "ring",
+            "link": "right_finger4_tip_link",
+            "joint": ["right_finger4_joint1", "right_finger4_joint2", "right_finger4_joint3", "right_finger4_joint4"],
+            "center_offset": [0.0, 0.0, -0.005],
+            "human_hand_id": 3
+        },
+        {
+            "name": "pinky",
+            "link": "right_finger5_tip_link",
+            "joint": ["right_finger5_joint1", "right_finger5_joint2", "right_finger5_joint3", "right_finger5_joint4"],
+            "center_offset": [0.0, 0.0, -0.005],
+            "human_hand_id": 4
+        }
+    ]
+}
