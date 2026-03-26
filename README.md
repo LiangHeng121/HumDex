@@ -68,6 +68,8 @@ pip install -e . && cd ..
 cd act
 pip install -r requirements.txt
 cd ..
+
+pip install websockets pyzmq redis opencv-python msgpack msgpack-numpy
 ```
 
 For the rest of `humdex` environment setup, follow TWIST2 README:
@@ -414,6 +416,19 @@ python policy_inference.py eval_online \
 ```
 
 Toggle inference on/off with keyboard (`k` = send, `p` = hold position, same as teleoperation).
+
+For DreamZero real-world test, start scripts in this order:
+
+```bash
+# on DreamZero server
+bash run_g1_realworld_server.sh
+
+# on local machine
+bash scripts/realsense_zmq_pub_g1.sh
+bash scripts/sim2real.sh
+bash scripts/wuji_hand_qpos_target_redis_single.sh
+bash run_g1_realworld_local_client.sh
+```
 
 ---
 
