@@ -23,9 +23,26 @@ import websockets.sync.client
 import zmq
 from openpi_client import msgpack_numpy
 
+from deploy_real.common.keyboard_toggle import KeyboardToggle
+from deploy_real.data_utils.params import DEFAULT_MIMIC_OBS
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _cosine_ease(alpha: float) -> float:
+    a = float(np.clip(alpha, 0.0, 1.0))
+    return 0.5 - 0.5 * float(np.cos(np.pi * a))
+
+
+def _build_safe_idle_action75(robot_key: str) -> np.ndarray:
+    """Build 75-dim safe idle action: body(35) + hand_left(20) + hand_right(20)."""
+    base = DEFAULT_MIMIC_OBS.get(robot_key, DEFAULT_MIMIC_OBS["unitree_g1"])
+    body_35 = np.array(base[:35], dtype=np.float32)
+    hand_left_20 = np.zeros(20, dtype=np.float32)
+    hand_right_20 = np.zeros(20, dtype=np.float32)
+    return np.concatenate([body_35, hand_left_20, hand_right_20])
 
 
 def _compute_sample_indices(buf_len: int, num_samples: int) -> list[int]:
@@ -135,6 +152,13 @@ class G1RedisIO:
         p.set(self.key_mode_r, "follow")
         p.execute()
 
+    def set_hand_mode(self, mode: str) -> None:
+        """Set hand modes: 'follow', 'hold', or 'default'."""
+        p = self.redis.pipeline()
+        p.set(self.key_mode_l, mode)
+        p.set(self.key_mode_r, mode)
+        p.execute()
+
 
 class WsClient:
     def __init__(self, host: str, port: int) -> None:
@@ -217,6 +241,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_chunks", type=int, default=50)
     p.add_argument("--prompt", default="pick up the object")
     p.add_argument("--session_id", default="")
+    p.add_argument("--ramp_seconds", type=float, default=2.0, help="Smooth ramp duration when toggling k (seconds)")
     return p.parse_args()
 
 
@@ -231,8 +256,39 @@ def main() -> None:
     ws = WsClient(args.server_host, args.server_port)
     frame_buf: deque[np.ndarray] = deque(maxlen=500)
 
+    kb = KeyboardToggle(enable=True)
+    kb.start()
+    print("[KEYBOARD] k=toggle send | p=hold | q=exit | e=emergency stop")
+
+    safe_idle_action = _build_safe_idle_action75(args.robot_key)
+    last_action = safe_idle_action.copy()
+    was_send_enabled = True
+
     try:
         for chunk_i in range(args.num_chunks):
+            # --- gate: wait while send is disabled, ramp to safe idle ---
+            while True:
+                send_enabled, _, exit_requested = kb.get_extended_state()
+                if exit_requested or send_enabled:
+                    break
+                if was_send_enabled:
+                    redis_io.set_hand_mode("default")
+                    ramp_from = last_action.copy()
+                    ramp_t0 = time.time()
+                    print("[MAIN] Send disabled, ramping to safe idle pose...")
+                    was_send_enabled = False
+                alpha = (time.time() - ramp_t0) / max(1e-6, args.ramp_seconds)
+                w = _cosine_ease(alpha)
+                interp = ramp_from + w * (safe_idle_action - ramp_from)
+                redis_io.publish_action(interp)
+                time.sleep(dt)
+            if exit_requested:
+                print("[MAIN] Exit requested via keyboard")
+                break
+            if not was_send_enabled:
+                print("[MAIN] Send re-enabled, resuming VLA control")
+                was_send_enabled = True
+
             body31, left20, right20 = redis_io.read_state71()
             if chunk_i == 0 or args.obs_frames <= 1:
                 frame_buf.append(vision.get_frame())
@@ -258,10 +314,41 @@ def main() -> None:
             frame_buf.clear()
             vis_frames = []
             exec_actions = []
+            last_action = action_chunk[0]
+            abort_chunk = False
+
             for s in range(H):
+                send_enabled, hold_enabled, exit_requested = kb.get_extended_state()
+                if exit_requested:
+                    abort_chunk = True
+                    break
+
+                # hold: freeze at current step until released
+                if hold_enabled:
+                    redis_io.set_hand_mode("hold")
+                while hold_enabled and not exit_requested:
+                    redis_io.publish_action(last_action)
+                    time.sleep(dt)
+                    _, hold_enabled, exit_requested = kb.get_extended_state()
+                    if not hold_enabled:
+                        redis_io.set_hand_mode("follow")
+                if exit_requested:
+                    abort_chunk = True
+                    break
+
                 t0 = time.time()
                 a = action_chunk[s]
-                redis_io.publish_action(a)
+                if send_enabled:
+                    redis_io.publish_action(a)
+                    last_action = a
+                else:
+                    if was_send_enabled:
+                        redis_io.set_hand_mode("default")
+                        ramp_from = last_action.copy()
+                        ramp_t0 = time.time()
+                        was_send_enabled = False
+                    w = _cosine_ease((time.time() - ramp_t0) / max(1e-6, args.ramp_seconds))
+                    redis_io.publish_action(ramp_from + w * (safe_idle_action - ramp_from))
                 exec_actions.append(a)
                 frame = vision.get_frame()
                 frame_buf.append(frame)
@@ -270,17 +357,35 @@ def main() -> None:
                 if elapsed < dt:
                     time.sleep(dt - elapsed)
 
-            log_resp = ws.log_chunk(
-                session_id=session_id,
-                chunk_id=chunk_id,
-                vision_frames=np.stack(vis_frames, axis=0),
-                executed_actions=np.stack(exec_actions, axis=0),
-            )
-            if not log_resp.get("ok", False):
-                raise RuntimeError(f"log_chunk failed: {log_resp}")
+            if vis_frames:
+                log_resp = ws.log_chunk(
+                    session_id=session_id,
+                    chunk_id=chunk_id,
+                    vision_frames=np.stack(vis_frames, axis=0),
+                    executed_actions=np.stack(exec_actions, axis=0),
+                )
+                if not log_resp.get("ok", False):
+                    raise RuntimeError(f"log_chunk failed: {log_resp}")
+
+            if abort_chunk:
+                print("[MAIN] Exit requested via keyboard")
+                break
     except KeyboardInterrupt:
         print("[INTERRUPT] stopping...")
     finally:
+        kb.stop()
+        try:
+            redis_io.set_hand_mode("default")
+            ramp_from = last_action.copy()
+            ramp_t0 = time.time()
+            print("[MAIN] Ramping to safe idle pose before exit...")
+            while (time.time() - ramp_t0) < args.ramp_seconds:
+                w = _cosine_ease((time.time() - ramp_t0) / max(1e-6, args.ramp_seconds))
+                redis_io.publish_action(ramp_from + w * (safe_idle_action - ramp_from))
+                time.sleep(dt)
+            redis_io.publish_action(safe_idle_action)
+        except Exception:
+            pass
         try:
             end_resp = ws.end(session_id=session_id)
             print(f"[END] {end_resp}")
