@@ -166,10 +166,15 @@ class ZmqJpegSubscriber:
         self.poller.register(self.sock, zmq.POLLIN)
         self.timeout_ms = int(timeout_ms)
         self.last_frame: np.ndarray | None = None
+        self._frame_seq: int = 0
 
     def get_frame(self) -> np.ndarray:
-        events = dict(self.poller.poll(self.timeout_ms))
-        if self.sock in events:
+        """Return latest frame. Drains queue to always get the newest."""
+        got_new = False
+        while True:
+            events = dict(self.poller.poll(0 if got_new else self.timeout_ms))
+            if self.sock not in events:
+                break
             msg = self.sock.recv()
             if len(msg) >= 12:
                 width = struct.unpack("i", msg[0:4])[0]
@@ -178,13 +183,24 @@ class ZmqJpegSubscriber:
                 payload = msg[12:]
                 if len(payload) == jpeg_len:
                     bgr = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-                    if bgr is not None and bgr.shape[0] == height and bgr.shape[1] == width:
+                    if bgr is not None:
                         self.last_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    elif bgr is not None:
-                        self.last_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        self._frame_seq += 1
+                        got_new = True
         if self.last_frame is None:
             self.last_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         return self.last_frame.copy()
+
+    def get_new_frame(self, timeout_ms: int = 200) -> np.ndarray | None:
+        """Block until a genuinely new frame arrives, or return None on timeout."""
+        old_seq = self._frame_seq
+        deadline = time.time() + timeout_ms / 1000.0
+        while time.time() < deadline:
+            self.get_frame()
+            if self._frame_seq > old_seq:
+                return self.last_frame.copy()
+            time.sleep(0.001)
+        return None
 
     def close(self) -> None:
         self.sock.close()
@@ -395,6 +411,11 @@ def main() -> None:
                 actual_obs_frames = 1
             else:
                 sample_indices = _compute_sample_indices(len(frame_buf), args.obs_frames)
+                sampled = [frame_buf[i] for i in sample_indices]
+                unique_count = len({f.data.tobytes() for f in sampled})
+                diffs = [float(np.abs(sampled[i].astype(float) - sampled[i - 1].astype(float)).mean()) for i in range(1, len(sampled))]
+                print(f"[SAMPLE] chunk={chunk_i} buf_len={len(frame_buf)} indices={sample_indices} "
+                      f"unique={unique_count}/{len(sampled)} frame_diffs=[{', '.join(f'{d:.1f}' for d in diffs)}]")
                 obs = _make_obs(frame_buf, body31, left20, right20, args.prompt, obs_frames=args.obs_frames, sample_indices=sample_indices)
                 actual_obs_frames = args.obs_frames
 
@@ -452,9 +473,11 @@ def main() -> None:
                     w = _cosine_ease((time.time() - ramp_t0) / max(1e-6, args.ramp_seconds))
                     redis_io.publish_action(ramp_from + w * (safe_idle_action - ramp_from))
                 exec_actions.append(a)
+                old_seq = vision._frame_seq
                 frame = vision.get_frame()
-                frame_buf.append(frame)
                 vis_frames.append(frame)
+                if vision._frame_seq > old_seq:
+                    frame_buf.append(frame)
                 elapsed = time.time() - t0
                 if elapsed < dt:
                     time.sleep(dt - elapsed)
