@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 
 import cv2
+import imageio
 import numpy as np
 import redis
 import websockets.sync.client
@@ -25,6 +28,12 @@ from openpi_client import msgpack_numpy
 
 from deploy_real.common.keyboard_toggle import KeyboardToggle
 from deploy_real.data_utils.params import DEFAULT_MIMIC_OBS
+
+try:
+    from act.sim_viz.visualizers import HumanoidVisualizer, HandVisualizer, get_default_paths
+    _HAS_SIM_VIZ = True
+except ImportError:
+    _HAS_SIM_VIZ = False
 
 
 def now_ms() -> int:
@@ -58,6 +67,93 @@ def _compute_sample_indices(buf_len: int, num_samples: int) -> list[int]:
     if num_samples >= buf_len:
         return list(range(buf_len))
     return [int(round(i * (buf_len - 1) / (num_samples - 1))) for i in range(num_samples)]
+
+
+class ChunkDebugger:
+    """Save per-chunk input images, actions, states, and optionally sim visualization."""
+
+    def __init__(self, debug_dir: str, session_id: str, sim_viz: bool = True):
+        self.root = Path(debug_dir) / session_id
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.body_viz = None
+        self.hand_l_viz = None
+        self.hand_r_viz = None
+        if sim_viz and _HAS_SIM_VIZ:
+            try:
+                paths = get_default_paths()
+                os.environ.setdefault("MUJOCO_GL", "egl")
+                os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+                self.body_viz = HumanoidVisualizer(
+                    paths["body_xml"], paths["body_policy"],
+                    width=320, height=240,
+                )
+                self.hand_l_viz = HandVisualizer(
+                    paths["left_hand_xml"], hand_side="left",
+                    width=320, height=240,
+                )
+                self.hand_r_viz = HandVisualizer(
+                    paths["right_hand_xml"], hand_side="right",
+                    width=320, height=240,
+                )
+                print(f"[DEBUG] Sim visualizers ready (body + hands)")
+            except Exception as e:
+                print(f"[DEBUG] Sim visualizers unavailable: {e}")
+        elif sim_viz and not _HAS_SIM_VIZ:
+            print("[DEBUG] Sim viz skipped (mujoco/onnxruntime not installed)")
+
+    def save_chunk(
+        self,
+        chunk_i: int,
+        input_frames: list[np.ndarray],
+        action_chunk: np.ndarray,
+        body31: np.ndarray,
+        left20: np.ndarray,
+        right20: np.ndarray,
+        control_fps: float = 30.0,
+    ) -> None:
+        cdir = self.root / f"chunk_{chunk_i:06d}"
+        cdir.mkdir(exist_ok=True)
+
+        for fi, frame in enumerate(input_frames):
+            rgb = frame if frame.shape[-1] == 3 else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cv2.imwrite(str(cdir / f"input_{fi:02d}.jpg"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+
+        np.save(str(cdir / "action_chunk.npy"), action_chunk)
+        np.save(str(cdir / "state.npy"), np.concatenate([body31, left20, right20]))
+
+        body_actions = action_chunk[:, :35]
+        hand_l_actions = action_chunk[:, 35:55]
+        hand_r_actions = action_chunk[:, 55:75]
+
+        fps = int(control_fps)
+        if self.body_viz is not None:
+            try:
+                body_frames = self.body_viz.visualize(
+                    body_actions, warmup_steps=80, reset=True, verbose=False,
+                )
+                imageio.mimsave(str(cdir / "sim_body.mp4"), body_frames, fps=fps)
+            except Exception as e:
+                print(f"[DEBUG] body sim failed chunk {chunk_i}: {e}")
+
+        if self.hand_l_viz is not None:
+            try:
+                hl_frames = self.hand_l_viz.visualize(
+                    hand_l_actions, warmup_steps=50, reset=True, verbose=False,
+                )
+                imageio.mimsave(str(cdir / "sim_hand_left.mp4"), hl_frames, fps=fps)
+            except Exception as e:
+                print(f"[DEBUG] hand_l sim failed chunk {chunk_i}: {e}")
+
+        if self.hand_r_viz is not None:
+            try:
+                hr_frames = self.hand_r_viz.visualize(
+                    hand_r_actions, warmup_steps=50, reset=True, verbose=False,
+                )
+                imageio.mimsave(str(cdir / "sim_hand_right.mp4"), hr_frames, fps=fps)
+            except Exception as e:
+                print(f"[DEBUG] hand_r sim failed chunk {chunk_i}: {e}")
+
+        print(f"[DEBUG] chunk {chunk_i} saved → {cdir}")
 
 
 class ZmqJpegSubscriber:
@@ -242,6 +338,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prompt", default="pick up the object")
     p.add_argument("--session_id", default="")
     p.add_argument("--ramp_seconds", type=float, default=2.0, help="Smooth ramp duration when toggling k (seconds)")
+    p.add_argument("--debug_dir", default="", help="If set, save per-chunk input images + sim viz to this directory")
     return p.parse_args()
 
 
@@ -255,6 +352,10 @@ def main() -> None:
     redis_io = G1RedisIO(args.redis_ip, args.robot_key)
     ws = WsClient(args.server_host, args.server_port)
     frame_buf: deque[np.ndarray] = deque(maxlen=500)
+
+    debugger: ChunkDebugger | None = None
+    if args.debug_dir:
+        debugger = ChunkDebugger(args.debug_dir, session_id)
 
     kb = KeyboardToggle(enable=True)
     kb.start()
@@ -298,6 +399,9 @@ def main() -> None:
                 sample_indices = _compute_sample_indices(len(frame_buf), args.obs_frames)
                 obs = _make_obs(frame_buf, body31, left20, right20, args.prompt, obs_frames=args.obs_frames, sample_indices=sample_indices)
                 actual_obs_frames = args.obs_frames
+
+            debug_input_frames = list(obs["video.head"])
+            debug_body31, debug_left20, debug_right20 = body31.copy(), left20.copy(), right20.copy()
 
             infer_resp = ws.request_infer(session_id=session_id, prompt=args.prompt, obs=obs)
             if not infer_resp.get("ok", False):
@@ -366,6 +470,17 @@ def main() -> None:
                 )
                 if not log_resp.get("ok", False):
                     raise RuntimeError(f"log_chunk failed: {log_resp}")
+
+            if debugger is not None:
+                debugger.save_chunk(
+                    chunk_i=chunk_i,
+                    input_frames=debug_input_frames,
+                    action_chunk=action_chunk,
+                    body31=debug_body31,
+                    left20=debug_left20,
+                    right20=debug_right20,
+                    control_fps=args.control_fps,
+                )
 
             if abort_chunk:
                 print("[MAIN] Exit requested via keyboard")

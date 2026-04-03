@@ -11,7 +11,9 @@ obs_frames=4
 control_fps=30
 num_chunks=100
 prompt="scan the barcode and pack the toy up"
+debug_dir="../results_g1_real_world/debug"
 
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
 python deploy_real/g1_local_exec_client.py \
   --server_host "${server_host}" \
   --server_port "${server_port}" \
@@ -22,5 +24,6 @@ python deploy_real/g1_local_exec_client.py \
   --obs_frames "${obs_frames}" \
   --control_fps "${control_fps}" \
   --num_chunks "${num_chunks}" \
-  --prompt "${prompt}"
+  --prompt "${prompt}" \
+  --debug_dir "${debug_dir}"
 
