@@ -263,9 +263,7 @@ class WsClient:
         self.ws = websockets.sync.client.connect(
             self.uri,
             compression=None,
-            max_size=None,
-            ping_interval=60,
-            ping_timeout=600,
+            max_size=None
         )
         self.meta = msgpack_numpy.unpackb(self.ws.recv())
         print(f"[WS] connected: {self.uri} meta={self.meta}")

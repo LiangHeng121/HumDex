@@ -5,16 +5,16 @@ server_host="127.0.0.1"
 server_port=8000
 redis_ip="localhost"
 robot_key="unitree_g1_with_hands"
-vision_host="127.0.0.1"
+vision_host="192.168.123.164"
 vision_port=5555
 obs_frames=4
 control_fps=30
 num_chunks=100
-prompt="scan the barcode and pack the toy up"
+prompt="pick up bread"
 debug_dir="../results_g1_real_world/debug"
 
 MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
-python deploy_real/g1_local_exec_client.py \
+python -m deploy_real.g1_local_exec_client \
   --server_host "${server_host}" \
   --server_port "${server_port}" \
   --redis_ip "${redis_ip}" \
