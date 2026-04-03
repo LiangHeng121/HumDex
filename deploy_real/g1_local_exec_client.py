@@ -28,6 +28,21 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _compute_sample_indices(buf_len: int, num_samples: int) -> list[int]:
+    """Compute uniformly-spaced indices to sample from a frame buffer.
+
+    E.g. buf_len=24, num_samples=4  →  [0, 8, 16, 23]
+    (similar to boqian's RELATIVE_OFFSETS = [-24, -17, -9, -1]).
+    """
+    if num_samples <= 0 or buf_len <= 0:
+        return []
+    if num_samples == 1:
+        return [buf_len - 1]
+    if num_samples >= buf_len:
+        return list(range(buf_len))
+    return [int(round(i * (buf_len - 1) / (num_samples - 1))) for i in range(num_samples)]
+
+
 class ZmqJpegSubscriber:
     def __init__(self, host: str, port: int, timeout_ms: int = 50) -> None:
         self.ctx = zmq.Context()
@@ -169,8 +184,11 @@ class WsClient:
         self.ws.close()
 
 
-def _make_obs(frame_buf: deque[np.ndarray], body31: np.ndarray, left20: np.ndarray, right20: np.ndarray, prompt: str, obs_frames: int) -> dict:
-    frames = list(frame_buf)[-obs_frames:]
+def _make_obs(frame_buf: deque[np.ndarray], body31: np.ndarray, left20: np.ndarray, right20: np.ndarray, prompt: str, obs_frames: int, sample_indices: list[int] | None = None) -> dict:
+    if sample_indices is not None:
+        frames = [frame_buf[i] for i in sample_indices]
+    else:
+        frames = list(frame_buf)[-obs_frames:]
     if len(frames) == 0:
         frames = [np.zeros((480, 640, 3), dtype=np.uint8)]
     while len(frames) < obs_frames:
@@ -211,13 +229,20 @@ def main() -> None:
     vision = ZmqJpegSubscriber(args.vision_host, args.vision_port)
     redis_io = G1RedisIO(args.redis_ip, args.robot_key)
     ws = WsClient(args.server_host, args.server_port)
-    frame_buf: deque[np.ndarray] = deque(maxlen=max(1, args.obs_frames))
+    frame_buf: deque[np.ndarray] = deque(maxlen=500)
 
     try:
         for chunk_i in range(args.num_chunks):
-            frame_buf.append(vision.get_frame())
             body31, left20, right20 = redis_io.read_state71()
-            obs = _make_obs(frame_buf, body31, left20, right20, args.prompt, args.obs_frames)
+            if chunk_i == 0 or args.obs_frames <= 1:
+                frame_buf.append(vision.get_frame())
+                obs = _make_obs(frame_buf, body31, left20, right20, args.prompt, obs_frames=1)
+                actual_obs_frames = 1
+            else:
+                sample_indices = _compute_sample_indices(len(frame_buf), args.obs_frames)
+                obs = _make_obs(frame_buf, body31, left20, right20, args.prompt, obs_frames=args.obs_frames, sample_indices=sample_indices)
+                actual_obs_frames = args.obs_frames
+
             infer_resp = ws.request_infer(session_id=session_id, prompt=args.prompt, obs=obs)
             if not infer_resp.get("ok", False):
                 raise RuntimeError(f"infer failed: {infer_resp}")
@@ -225,10 +250,12 @@ def main() -> None:
             action_chunk = np.asarray(infer_resp["action_chunk"], dtype=np.float32)
             H = int(action_chunk.shape[0])
             print(
-                f"[CHUNK {chunk_i}] id={chunk_id} H={H} pred_video_frames={infer_resp.get('pred_video_frames')} "
+                f"[CHUNK {chunk_i}] id={chunk_id} H={H} obs_frames={actual_obs_frames} "
+                f"pred_video_frames={infer_resp.get('pred_video_frames')} "
                 f"infer_sec={infer_resp.get('infer_sec', -1):.3f}"
             )
 
+            frame_buf.clear()
             vis_frames = []
             exec_actions = []
             for s in range(H):
